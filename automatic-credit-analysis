@@ -1,0 +1,197 @@
+require 'json'
+require 'typhoeus'
+
+module Infra
+  class HttpRequest
+    def initialize(base_url:, http_requester: Typhoeus::Request, timeout: 3000)
+      @base_url = base_url
+      @http_requester = http_requester
+      @timeout = timeout
+    end
+
+    def get(path:, params: nil)
+      handle_response do
+        @http_requester.new(
+          "#{@base_url}/#{path}",
+          method: :get,
+          params: params,
+          cache_ttl: 500,
+          connecttimeout_ms: @timeout,
+          timeout_ms: @timeout
+        )
+      end
+    end
+
+    def post(path:, params: nil, body: "", headers: {})
+      handle_response do
+        @http_requester.new(
+          "#{@base_url}/#{path}",
+          method: :post,
+          params: params,
+          body: body,
+          cache_ttl: 500,
+          connecttimeout_ms: @timeout,
+          timeout_ms: @timeout,
+          headers: headers
+        )
+      end
+    end
+
+    def put(path:, params: nil, body: "", headers: {})
+      handle_response do
+        @http_requester.new(
+          "#{@base_url}/#{path}",
+          method: :put,
+          params: params,
+          body: body,
+          cache_ttl: 500,
+          connecttimeout_ms: @timeout,
+          timeout_ms: @timeout,
+          headers: headers
+        )
+      end
+    end
+
+    private
+    def handle_response
+      request = yield
+
+      request.on_complete do |response|
+        return response if response.success?
+
+        fail StandardError
+      end
+
+      request.run
+    end
+  end
+end
+
+class CamundaExternalTaskScript
+  attr_reader :request
+
+  def initialize
+    @request = Infra::HttpRequest.new(base_url: 'http://localhost:8080/engine-rest/external-task')
+  end
+
+  def run
+    loop do
+      response = fetch_and_lock(fetch_body(external_tasks_topics))
+      decoded_response = JSON.parse(response.response_body)
+
+      if decoded_response.any?
+        puts decoded_response
+        decoded_task = decoded_response.first
+
+        perform_decide_on_priority(decoded_task) if decoded_task['topicName'] == 'DecideOnPriority'
+        perform_check_for_nearby_service(decoded_task) if decoded_task['topicName'] == 'CheckForNearbyService'
+        perform_findout_documents_to_be_uploaded(decoded_task) if decoded_task['topicName'] == 'FindoutDocumentsToBeUploaded'
+
+        puts response.response_code
+      else
+        print '.'
+      end
+
+      sleep(2)
+    end
+  end
+
+  def perform_findout_documents_to_be_uploaded(decoded_task)
+    complete_task(decoded_task, {
+     "docsRequired": {"value": findout_documents_to_be_uploaded(decoded_task)}
+    })
+  end
+
+  def findout_documents_to_be_uploaded(decoded_task)
+    docs_required = decoded_task.dig('variables', 'docsRequired', 'value')
+    docs_required.delete('DUT') if decoded_task.dig('variables', 'dutApproved', 'value') == true
+    docs_required.delete('Proof of Residance') if decoded_task.dig('variables', 'proofOfResidenceApproved', 'value') == true
+    docs_required.delete('Boleto IQ') if decoded_task.dig('variables', 'boletoIQApproved', 'value') == true
+    docs_required.delete('ID') if decoded_task.dig('variables', 'idApproved', 'value') == true
+    docs_required.delete('Holerite') if decoded_task.dig('variables', 'proofOfIncomeApproved', 'value') == true
+    docs_required.delete('Bank Statement') if decoded_task.dig('variables', 'proofOfIncomeApproved', 'value') == true
+
+    docs_required
+  end
+
+  def perform_check_for_nearby_service(decoded_task)
+    complete_task(decoded_task, {
+      "nearbyServiceFound": {"value": check_for_nearby_service}
+    })
+  end
+
+  def check_for_nearby_service
+    [true, false].sample
+  end
+
+  def perform_decide_on_priority(decoded_task)
+    complete_task(decoded_task, {
+      "priority": {"value": calculate_priority}
+    })
+  end
+
+  def calculate_priority
+    (10..100).step(10).to_a.sample
+  end
+
+  def complete_task(decoded_task, variables)
+    request.post(
+      path: "#{decoded_task["id"]}/complete",
+      body: JSON.dump(complete_body(variables)),
+      headers: {'Content-Type' => 'application/json'}
+    )
+  end
+
+  def fetch_and_lock(body)
+    request.post(
+      path: 'fetchAndLock',
+      body: JSON.dump(body),
+      headers: {'Content-Type' => 'application/json'}
+    )
+  end
+
+  def complete_body(variables)
+    {
+      "workerId": "my-fancy-id",
+      "variables":
+      {
+        #"approvalTeam": {"value": 'formalization'},
+      }.merge(variables)
+    }
+  end
+
+  def fetch_body(topics)
+    {
+      "workerId": "my-fancy-id",
+      "maxTasks": 1,
+      "usePriority": true,
+      "topics": topics
+    }
+  end
+
+  def external_tasks_topics
+    [{
+      "topicName": 'CheckForNearbyService',
+      "lockDuration": 10000,
+      "variables": []
+    }, {
+      "topicName": 'DecideOnPriority',
+      "lockDuration": 10000,
+      "variables": []
+    }, {
+      "topicName": 'FindoutDocumentsToBeUploaded',
+      "lockDuration": 10000,
+      "deserializeValues": true,
+      "variables": [
+        'docsRequired',
+        'boletoIQApproved',
+        'idApproved',
+        'proofOfIncomeApproved',
+        'proofOfResidenceApproved',
+        'dutApproved'
+      ]
+    }]
+  end
+end
+
+CamundaExternalTaskScript.new.run
