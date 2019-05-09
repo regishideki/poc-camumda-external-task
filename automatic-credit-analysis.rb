@@ -43,7 +43,7 @@ class CamundaExternalTaskScript
   attr_reader :request
 
   def initialize
-    # falta autenticar :(
+    # falta autenticar e mudar o host para apontar para staging :(
     @request = Infra::HttpRequest.new(base_url: 'http://localhost:8080/engine-rest/external-task')
   end
 
